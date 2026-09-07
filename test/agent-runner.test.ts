@@ -1741,7 +1741,7 @@ describe("extensionCanonicalNames (#143 — package short name alias)", () => {
 
   it("aliases a package-declared index.ts entry to the unscoped, lowercased package name", () => {
     // Without this, `pi.extensions: ["./src/index.ts"]` only ever matches as "src".
-    const dir = pkgDir("@tintinweb/Pi-Subagents", ["./src/index.ts"]);
+    const dir = pkgDir("@ac5tin/Pi-Subagents", ["./src/index.ts"]);
     expect(extensionCanonicalNames(join(dir, "src", "index.ts"))).toEqual(["src", "pi-subagents"]);
   });
 
@@ -1872,7 +1872,7 @@ describe("agent-runner extension allowlist", () => {
     try {
       writeFileSync(
         join(dir, "package.json"),
-        JSON.stringify({ name: "@tintinweb/pi-subagents", pi: { extensions: ["./src/index.ts"] } }),
+        JSON.stringify({ name: "@ac5tin/pi-subagents", pi: { extensions: ["./src/index.ts"] } }),
       );
       mkdirSync(join(dir, "src"));
       writeFileSync(join(dir, "src", "index.ts"), "export default () => {};");
@@ -2732,5 +2732,55 @@ describe("resolveDefaultModel", () => {
 
   it("returns undefined when neither a config model nor a parent model exists", () => {
     expect(resolveDefaultModel(undefined, registry([haiku]), undefined)).toBeUndefined();
+  });
+});
+
+describe("agent-runner thinking-level inheritance", () => {
+  it("inherits the parent's LIVE thinking level when nothing is configured", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    const liveCtx = { ...ctx, thinkingLevel: "high" } as any;
+
+    await runAgent(liveCtx, "Explore", "go", { pi });
+
+    expect(createAgentSession.mock.calls[0][0].thinkingLevel).toBe("high");
+  });
+
+  it("an agent-file `thinking:` outranks the parent's live level", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValueOnce({
+      ...getAgentConfig("Explore"),
+      thinking: "low",
+    } as any);
+
+    await runAgent({ ...ctx, thinkingLevel: "high" } as any, "Explore", "go", { pi });
+
+    expect(createAgentSession.mock.calls[0][0].thinkingLevel).toBe("low");
+  });
+
+  it("an explicit spawn option outranks both the parent and the agent file", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValueOnce({
+      ...getAgentConfig("Explore"),
+      thinking: "low",
+    } as any);
+
+    await runAgent({ ...ctx, thinkingLevel: "high" } as any, "Explore", "go", {
+      pi,
+      thinkingLevel: "xhigh",
+    });
+
+    expect(createAgentSession.mock.calls[0][0].thinkingLevel).toBe("xhigh");
+  });
+
+  it("omits thinkingLevel when the parent has no live level either", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(createAgentSession.mock.calls[0][0]).not.toHaveProperty("thinkingLevel");
   });
 });

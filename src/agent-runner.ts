@@ -78,7 +78,7 @@ export function extensionCanonicalName(extPath: string): string {
  * The name is then taken only when that root's `pi.extensions` manifest actually
  * lists this entry. That "declares this entry" check is deliberate: our own test
  * fixtures live under this repo, whose root manifest declares `./src/index.ts`
- * as `@tintinweb/pi-subagents`, so a looser rule would misattribute every
+ * as `@ac5tin/pi-subagents`, so a looser rule would misattribute every
  * co-located file to `pi-subagents`.
  */
 function extensionPackageName(extPath: string): string | undefined {
@@ -833,8 +833,12 @@ export async function runAgent(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
   );
 
-  // Resolve thinking level: explicit option > agent config > undefined (inherit)
-  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
+  // Resolve thinking level: explicit option > agent config > parent's LIVE level.
+  // `ctx.thinkingLevel` is a live getter (pi 0.82.0+; absent below), so a child
+  // spawned after the user switched levels mid-session follows the new level —
+  // same shim as mention-clone.ts.
+  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking
+    ?? (ctx as { thinkingLevel?: ThinkingLevel }).thinkingLevel;
 
   const disallowedSet = agentConfig?.disallowedTools
     ? new Set(agentConfig.disallowedTools)
@@ -977,6 +981,8 @@ export async function runAgent(
 
   // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
   // modelRuntime, but ExtensionContext still exposes only the registry facade.
+  // SAFETY: modelRegistry's private facade field carries the ModelRuntime on
+  // both pi versions; only its type visibility differs across the range.
   // Pass both so the full supported Pi range retains the parent's providers.
   const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime;
   const sessionOpts: Parameters<typeof createAgentSession>[0] & {
