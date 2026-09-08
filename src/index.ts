@@ -1807,17 +1807,19 @@ Terse command-style prompts produce shallow, generic work.
         defaultRunInBackground: getBackgroundByDefault(),
       });
 
-      // Resolve model from agent config first; tool-call params only fill gaps.
-      let model = ctx.model;
+      // Pins only for spawn. Live-parent inherit is runAgent's job — passing
+      // ctx.model as options.model would look like a caller override.
+      let pinned: typeof ctx.model;
       if (resolvedConfig.modelInput) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") {
           if (resolvedConfig.modelFromParams) return textResult(resolved);
           // config-specified: silent fallback to parent
         } else {
-          model = resolved;
+          pinned = resolved;
         }
       }
+      const model = pinned ?? ctx.model;
 
       // Scope validation: the effective resolved model is checked against the
       // user's enabledModels list. Policy (hard error vs warn-and-proceed) lives
@@ -2055,7 +2057,7 @@ Terse command-style prompts produce shallow, generic work.
         id = manager.spawn(pi, ctx, subagentType, params.prompt, {
           description: params.description,
           name: params.name as string | undefined,
-          model,
+          model: pinned,
           maxTurns: effectiveMaxTurns,
           isolated,
           inheritContext,
@@ -2209,7 +2211,7 @@ Terse command-style prompts produce shallow, generic work.
         const fgResult = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
           description: params.description,
           name: params.name as string | undefined,
-          model,
+          model: pinned,
           maxTurns: effectiveMaxTurns,
           isolated,
           inheritContext,
@@ -3981,6 +3983,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
     viewAgentConversation,
     // Read lazily: `currentCtx` is rebound on every session_start, and the
     // fleet list may act between sessions, when there is none.
+    // SAFETY: WorkflowMenuDeps wants ExtensionCommandContext; currentCtx is the
+    // session ExtensionContext. Command methods are only used from TUI menus.
     getCtx: () => currentCtx as unknown as ExtensionCommandContext | undefined,
   };
 

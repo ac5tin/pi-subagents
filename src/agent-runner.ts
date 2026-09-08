@@ -10,6 +10,7 @@ import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-
 import {
   type AgentSession,
   type AgentSessionEvent,
+  buildSessionContext,
   createAgentSession,
   DefaultResourceLoader,
   type ExtensionAPI,
@@ -78,7 +79,7 @@ export function extensionCanonicalName(extPath: string): string {
  * The name is then taken only when that root's `pi.extensions` manifest actually
  * lists this entry. That "declares this entry" check is deliberate: our own test
  * fixtures live under this repo, whose root manifest declares `./src/index.ts`
- * as `@tintinweb/pi-subagents`, so a looser rule would misattribute every
+ * as `@ac5tin/pi-subagents`, so a looser rule would misattribute every
  * co-located file to `pi-subagents`.
  */
 function extensionPackageName(extPath: string): string | undefined {
@@ -386,6 +387,24 @@ export function resolveDefaultModel(
   }
 
   return parentModel;
+}
+
+function liveParentFromSession(ctx: ExtensionContext) {
+  const sm = ctx.sessionManager;
+  if (!sm?.getEntries || !sm.getLeafId) return {};
+  const { model, thinkingLevel } = buildSessionContext(sm.getEntries(), sm.getLeafId());
+  return { thinkingLevel, model: model ?? undefined };
+}
+
+function inheritedParentModel(
+  ref: { provider: string; modelId: string } | undefined,
+  registry: ExtensionContext["modelRegistry"],
+): Model<any> | undefined {
+  if (!ref) return undefined;
+  const found = registry.find(ref.provider, ref.modelId);
+  if (found) return found;
+  const all = (registry.getAvailable?.() ?? []) as Array<{ provider: string; id: string }>;
+  return all.find(m => m.provider === ref.provider && m.id === ref.modelId) as Model<any> | undefined;
 }
 
 /** Info about a tool event in the subagent. */
@@ -828,13 +847,18 @@ export async function runAgent(
     }
   }
 
-  // Resolve model: explicit option > config.model > parent model
-  const model = options.model ?? resolveDefaultModel(
-    ctx.model, ctx.modelRegistry, agentConfig?.model,
-  );
+  // Caller > agent-file > session branch > ctx.model. Resume skips session inherit.
+  const inherited = options.resumeSessionFile ? undefined : liveParentFromSession(ctx);
+  const parent = inheritedParentModel(inherited?.model, ctx.modelRegistry) ?? ctx.model;
+  const model = options.model ?? resolveDefaultModel(parent, ctx.modelRegistry, agentConfig?.model);
 
-  // Resolve thinking level: explicit option > agent config > undefined (inherit)
-  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
+  // Caller > agent-file > ctx.thinkingLevel > session (skip placeholder "off").
+  const sessionThinking = inherited?.thinkingLevel && inherited.thinkingLevel !== "off"
+    ? inherited.thinkingLevel as ThinkingLevel
+    : undefined;
+  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking
+    ?? (ctx as { thinkingLevel?: ThinkingLevel }).thinkingLevel
+    ?? sessionThinking;
 
   const disallowedSet = agentConfig?.disallowedTools
     ? new Set(agentConfig.disallowedTools)
@@ -977,6 +1001,8 @@ export async function runAgent(
 
   // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
   // modelRuntime, but ExtensionContext still exposes only the registry facade.
+  // SAFETY: modelRegistry's private facade field carries the ModelRuntime on
+  // both pi versions; only its type visibility differs across the range.
   // Pass both so the full supported Pi range retains the parent's providers.
   const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime;
   const sessionOpts: Parameters<typeof createAgentSession>[0] & {

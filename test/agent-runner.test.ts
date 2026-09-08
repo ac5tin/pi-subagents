@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   createAgentSession,
+  buildSessionContext,
   defaultResourceLoaderCtor,
   loaderExtensionsRef,
   getAgentDir,
@@ -15,6 +16,7 @@ const {
   settingsManagerGetSessionDir,
 } = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
+  buildSessionContext: vi.fn(() => ({ messages: [], thinkingLevel: "off", model: null })),
   defaultResourceLoaderCtor: vi.fn(),
   loaderExtensionsRef: {
     current: { extensions: [], errors: [], runtime: {} } as {
@@ -33,6 +35,7 @@ const {
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession,
+  buildSessionContext,
   // Identity, as pi's own is: `defineTool` exists for the type inference, and
   // the structured-output tool is built through it.
   defineTool: (definition: unknown) => definition,
@@ -194,6 +197,8 @@ const ctx = {
   sessionManager: {
     getBranch: vi.fn(() => []),
     getSessionFile: vi.fn(() => "/sessions/parent.jsonl"),
+    getEntries: vi.fn(() => []),
+    getLeafId: vi.fn(() => "leaf"),
   },
 } as any;
 
@@ -201,6 +206,8 @@ const pi = {} as any;
 
 beforeEach(() => {
   createAgentSession.mockReset();
+  buildSessionContext.mockReset();
+  buildSessionContext.mockReturnValue({ messages: [], thinkingLevel: "off", model: null });
   defaultResourceLoaderCtor.mockClear();
   getAgentDir.mockClear();
   sessionManagerInMemory.mockClear();
@@ -1741,7 +1748,7 @@ describe("extensionCanonicalNames (#143 — package short name alias)", () => {
 
   it("aliases a package-declared index.ts entry to the unscoped, lowercased package name", () => {
     // Without this, `pi.extensions: ["./src/index.ts"]` only ever matches as "src".
-    const dir = pkgDir("@tintinweb/Pi-Subagents", ["./src/index.ts"]);
+    const dir = pkgDir("@ac5tin/Pi-Subagents", ["./src/index.ts"]);
     expect(extensionCanonicalNames(join(dir, "src", "index.ts"))).toEqual(["src", "pi-subagents"]);
   });
 
@@ -1872,7 +1879,7 @@ describe("agent-runner extension allowlist", () => {
     try {
       writeFileSync(
         join(dir, "package.json"),
-        JSON.stringify({ name: "@tintinweb/pi-subagents", pi: { extensions: ["./src/index.ts"] } }),
+        JSON.stringify({ name: "@ac5tin/pi-subagents", pi: { extensions: ["./src/index.ts"] } }),
       );
       mkdirSync(join(dir, "src"));
       writeFileSync(join(dir, "src", "index.ts"), "export default () => {};");
@@ -2732,5 +2739,213 @@ describe("resolveDefaultModel", () => {
 
   it("returns undefined when neither a config model nor a parent model exists", () => {
     expect(resolveDefaultModel(undefined, registry([haiku]), undefined)).toBeUndefined();
+  });
+});
+
+describe("agent-runner thinking-level inheritance", () => {
+  it("inherits the parent's LIVE thinking level when nothing is configured", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    const liveCtx = { ...ctx, thinkingLevel: "high" } as any;
+
+    await runAgent(liveCtx, "Explore", "go", { pi });
+
+    expect(createAgentSession.mock.calls[0][0].thinkingLevel).toBe("high");
+  });
+
+  it("an agent-file `thinking:` outranks the parent's live level", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValueOnce({
+      ...getAgentConfig("Explore"),
+      thinking: "low",
+    } as any);
+
+    await runAgent({ ...ctx, thinkingLevel: "high" } as any, "Explore", "go", { pi });
+
+    expect(createAgentSession.mock.calls[0][0].thinkingLevel).toBe("low");
+  });
+
+  it("an explicit spawn option outranks both the parent and the agent file", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValueOnce({
+      ...getAgentConfig("Explore"),
+      thinking: "low",
+    } as any);
+
+    await runAgent({ ...ctx, thinkingLevel: "high" } as any, "Explore", "go", {
+      pi,
+      thinkingLevel: "xhigh",
+    });
+
+    expect(createAgentSession.mock.calls[0][0].thinkingLevel).toBe("xhigh");
+  });
+
+  it("omits thinkingLevel when the parent has no live level either", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(createAgentSession.mock.calls[0][0]).not.toHaveProperty("thinkingLevel");
+  });
+});
+
+describe("agent-runner live parent inherit", () => {
+  const grok = { provider: "xai", id: "grok-4.6" };
+  const haiku = { provider: "anthropic", id: "claude-haiku-4-5" };
+  const findingRegistry = {
+    find: vi.fn((provider: string, id: string) => ({ provider, id })),
+  };
+
+  function twinConfig() {
+    return makeAgentConfig({
+      name: "general-purpose",
+      promptMode: "append",
+    });
+  }
+
+  it("a twin with no caller or config model uses the live parent model", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValueOnce(twinConfig() as any);
+
+    await runAgent({ ...ctx, model: grok, modelRegistry: findingRegistry } as any, "general-purpose", "go", { pi });
+
+    expect(createAgentSession.mock.calls[0][0].model).toEqual(grok);
+  });
+
+  it("resolves the session-branch model via available models when find misses", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValueOnce(twinConfig() as any);
+    buildSessionContext.mockReturnValue({
+      messages: [],
+      thinkingLevel: "off",
+      model: { provider: "xai", modelId: "grok-4.6" },
+    } as any);
+    const registry = {
+      find: vi.fn(() => undefined),
+      getAvailable: () => [grok],
+      getAll: () => [grok],
+    };
+
+    await runAgent({ ...ctx, model: undefined, modelRegistry: registry } as any, "general-purpose", "go", { pi });
+
+    expect(createAgentSession.mock.calls[0][0].model).toEqual(grok);
+  });
+
+  it("session-branch model outranks a stale ctx.model when nothing is pinned", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValueOnce(twinConfig() as any);
+    buildSessionContext.mockReturnValue({
+      messages: [],
+      thinkingLevel: "off",
+      model: { provider: "xai", modelId: "grok-4.6" },
+    } as any);
+    const muse = { provider: "opencode-go", id: "muse-spark-1.3-contributor" };
+
+    await runAgent(
+      { ...ctx, model: muse, modelRegistry: findingRegistry } as any,
+      "general-purpose",
+      "go",
+      { pi },
+    );
+
+    expect(createAgentSession.mock.calls[0][0].model).toEqual(grok);
+  });
+
+  it("resolves the parent model from the session context when ctx.model is empty", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValueOnce(twinConfig() as any);
+    buildSessionContext.mockReturnValue({
+      messages: [],
+      thinkingLevel: "off",
+      model: { provider: "xai", modelId: "grok-4.6" },
+    } as any);
+
+    await runAgent({ ...ctx, model: undefined, modelRegistry: findingRegistry } as any, "general-purpose", "go", { pi });
+
+    expect(createAgentSession.mock.calls[0][0].model).toEqual(grok);
+  });
+
+  it("a caller model outranks the live parent", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValueOnce(twinConfig() as any);
+
+    await runAgent(
+      { ...ctx, model: grok, modelRegistry: findingRegistry } as any,
+      "general-purpose",
+      "go",
+      { pi, model: haiku as any },
+    );
+
+    expect(createAgentSession.mock.calls[0][0].model).toEqual(haiku);
+  });
+
+  it("an agent-config model pin outranks the live parent", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValueOnce({
+      ...getAgentConfig("Explore"),
+      model: "anthropic/claude-haiku-4-5",
+    } as any);
+
+    await runAgent({ ...ctx, model: grok, modelRegistry: findingRegistry } as any, "Explore", "go", { pi });
+
+    expect(createAgentSession.mock.calls[0][0].model).toEqual(haiku);
+  });
+
+  it("an agent-config thinking pin outranks the live parent level", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValueOnce({
+      ...getAgentConfig("Explore"),
+      thinking: "low",
+    } as any);
+
+    await runAgent({ ...ctx, thinkingLevel: "high" } as any, "Explore", "go", { pi });
+
+    expect(createAgentSession.mock.calls[0][0].thinkingLevel).toBe("low");
+  });
+
+  it("omitted thinking uses the live parent level, including session context", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValueOnce(twinConfig() as any);
+    buildSessionContext.mockReturnValue({
+      messages: [],
+      thinkingLevel: "high",
+      model: null,
+    });
+
+    await runAgent({ ...ctx, thinkingLevel: undefined } as any, "general-purpose", "go", { pi });
+
+    expect(createAgentSession.mock.calls[0][0].thinkingLevel).toBe("high");
+  });
+
+  it("does not inherit parent model onto a resumed session", async () => {
+    const { session } = createSession("ok");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValueOnce(twinConfig() as any);
+    buildSessionContext.mockReturnValue({
+      messages: [],
+      thinkingLevel: "high",
+      model: { provider: "xai", modelId: "grok-4.6" },
+    } as any);
+
+    await runAgent(
+      { ...ctx, model: undefined, modelRegistry: findingRegistry } as any,
+      "general-purpose",
+      "carry on",
+      { pi, resumeSessionFile: "/sessions/explore.jsonl" },
+    );
+
+    expect(createAgentSession.mock.calls[0][0].model).toBeUndefined();
+    expect(sessionManagerOpen).toHaveBeenCalled();
   });
 });

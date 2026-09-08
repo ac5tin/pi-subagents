@@ -1,4 +1,4 @@
-# Contributing to @tintinweb/pi-subagents
+# Contributing to @ac5tin/pi-subagents
 
 This guide exists to save both sides time.
 
