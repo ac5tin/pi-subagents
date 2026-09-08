@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Omitted model and thinking inherit the live parent session, not settings.json.** When neither the `Agent` call nor the agent file set a field, `createAgentSession` fell through to pi's `defaultModel` / `defaultThinkingLevel`. A twin spawned from a live `grok-4.6` session therefore ran the settings default. Resolution now also reads the parent session branch when the ctx getters are empty. Caller and frontmatter pins still win. Resume is unchanged.
+
 ## [0.19.1] - 2026-09-07
 
 ### Fixed

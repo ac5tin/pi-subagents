@@ -10,6 +10,7 @@ import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-
 import {
   type AgentSession,
   type AgentSessionEvent,
+  buildSessionContext,
   createAgentSession,
   DefaultResourceLoader,
   type ExtensionAPI,
@@ -386,6 +387,21 @@ export function resolveDefaultModel(
   }
 
   return parentModel;
+}
+
+/** Live parent model/thinking from the session branch, when the ctx getters are empty. */
+function liveParentFromSession(ctx: ExtensionContext): {
+  model?: { provider: string; modelId: string };
+  thinkingLevel?: string;
+} {
+  const sm = ctx.sessionManager;
+  if (!sm?.getEntries || !sm.getLeafId) return {};
+  const session = buildSessionContext(sm.getEntries(), sm.getLeafId());
+  const out: { model?: { provider: string; modelId: string }; thinkingLevel?: string } = {
+    thinkingLevel: session.thinkingLevel,
+  };
+  if (session.model) out.model = session.model;
+  return out;
 }
 
 /** Info about a tool event in the subagent. */
@@ -828,17 +844,25 @@ export async function runAgent(
     }
   }
 
-  // Resolve model: explicit option > config.model > parent model
+  // Resolve model: caller > agent config > live ctx > session branch.
+  // Resume replays the stored session; do not copy the parent's live model onto it.
+  const inherited = options.resumeSessionFile ? undefined : liveParentFromSession(ctx);
   const model = options.model ?? resolveDefaultModel(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
-  );
+  ) ?? (inherited?.model
+    ? ctx.modelRegistry.find(inherited.model.provider, inherited.model.modelId)
+    : undefined);
 
-  // Resolve thinking level: explicit option > agent config > parent's LIVE level.
-  // `ctx.thinkingLevel` is a live getter (pi 0.82.0+; absent below), so a child
-  // spawned after the user switched levels mid-session follows the new level —
-  // same shim as mention-clone.ts.
+  // Thinking: caller > agent config > live ctx getter > session branch.
+  // `ctx.thinkingLevel` is a live getter (pi 0.82.0+; absent below).
+  // Session-context `"off"` is the placeholder mention-clone.ts documents — skip it
+  // so pi can still apply settings when nobody ever set a level.
+  const sessionThinking = inherited?.thinkingLevel && inherited.thinkingLevel !== "off"
+    ? inherited.thinkingLevel as ThinkingLevel
+    : undefined;
   const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking
-    ?? (ctx as { thinkingLevel?: ThinkingLevel }).thinkingLevel;
+    ?? (ctx as { thinkingLevel?: ThinkingLevel }).thinkingLevel
+    ?? sessionThinking;
 
   const disallowedSet = agentConfig?.disallowedTools
     ? new Set(agentConfig.disallowedTools)
